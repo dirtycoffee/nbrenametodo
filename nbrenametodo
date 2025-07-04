@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+
+# Register the new subcommand
+_subcommands add "rename-nb-todo"
+
+# Define help and usage text for the subcommand
+_subcommands describe "rename-nb-todo" <<'HEREDOC'
+Usage:
+  nb rename-nb-todo [<filename.todo.md> | <directory_path>]
+
+Description:
+  Renames any file ending in '.todo.md' to a name based on its Markdown title.
+  The plugin expects the title to be in the format "# [ ] Your Task Title"
+  or "# [x] Your Task Title" on the first line of the file.
+
+  If a specific file is provided, only that file will be renamed.
+  If a directory path is provided (or no argument, implying the current directory),
+  all files matching "*.todo.md" in that directory will be processed.
+HEREDOC
+
+# Helper function to perform the actual rename for a single file
+_perform_single_rename() {
+  local full_path_filename="$1"
+  local filename=$(basename "$full_path_filename") # Get just the filename, remove path
+
+  # Crucial check: Ensure the filename is not empty before proceeding
+  if [[ -z "$full_path_filename" ]]; then
+    printf "Warning: Attempted to process an empty filename. Skipping.\n"
+    return 0
+  fi
+
+  # Only check if it has the .todo.md extension.
+  if [[ ! "$filename" =~ \.todo\.md$ ]]; then
+    printf "Skipping '%s': Does not have the .todo.md file extension.\n" "$full_path_filename"
+    return 0
+  fi
+
+  if [ ! -f "$full_path_filename" ]; then
+    printf "Error: File '%s' not found. Skipping.\n" "$full_path_filename"
+    return 1
+  fi
+
+  # Read the first line to get the title
+  local first_line=$(head -n 1 "$full_path_filename")
+  local title=""
+
+  # UPDATED REGEX: To match both "# []" and "# [x]" (for completed todos)
+  # Also handles potential leading/trailing whitespace around the title part.
+  if [[ "$first_line" =~ ^#\ \[.\]\ (.*)$ ]]; then # Matches # [any_char] followed by space and captures the rest
+    title="${BASH_REMATCH[1]}"
+  else
+    printf "Skipping '%s': Could not find a todo title in the format '# [ ] Your Task Title' or '# [x] Your Task Title' in the first line. First line was: '%s'\n" "$full_path_filename" "$first_line"
+    return 0
+  fi
+
+  # Trim leading/trailing whitespace from the extracted title
+  title=$(echo "$title" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+  if [ -z "$title" ]; then
+    printf "Skipping '%s': The extracted title is empty after trimming whitespace. Cannot rename file.\n" "$full_path_filename"
+    return 0
+  fi
+
+  # Sanitize the title for use as a filename
+  local new_filename_base=$(echo "$title" | tr ' ' '_')
+  new_filename_base=$(echo "$new_filename_base" | sed 's/[^a-zA-Z0-9_-]//g')
+  new_filename_base=$(echo "$new_filename_base" | tr '[:upper:]' '[:lower:]')
+
+  # Construct the new full path, ensuring it stays in the same directory
+  local new_full_path_filename="$(dirname "$full_path_filename")/${new_filename_base}.todo.md"
+
+  # Check if the current filename is already the desired new filename
+  if [ "$full_path_filename" = "$new_full_path_filename" ]; then
+    printf "No rename needed for '%s': Already has the desired name.\n" "$full_path_filename"
+    return 0
+  fi
+
+  # Check for conflicts (new file name already exists)
+  if [ -f "$new_full_path_filename" ]; then
+    printf "Error: A file named '%s' already exists. Cannot rename '%s' to '%s' to prevent overwriting.\n" "$new_full_path_filename" "$full_path_filename" "$new_full_path_filename"
+    return 1
+  fi
+
+  mv "$full_path_filename" "$new_full_path_filename"
+  printf "Renamed '%s' to '%s'\n" "$full_path_filename" "$new_full_path_filename"
+  return 0
+}
+
+# The main function for the plugin, called by nb
+_rename-nb-todo() {
+  local target="${1:-.}" # Default to current directory if no argument
+
+  # Check if target is a valid directory
+  if [ -d "$target" ]; then
+    printf "Processing all *.todo.md files in directory: %s\n" "$target"
+    local renamed_count=0
+    local failed_count=0
+
+    # Collect all files into an array first, isolating the find command
+    local files_to_process=()
+    while IFS= read -r -d $'\0' file_found; do
+      files_to_process+=("$file_found")
+    done < <(find "$target" -maxdepth 1 -type f -name "*.todo.md" -print0)
+
+    # Now loop through the array, which is completely separate from the pipe
+    for file_found in "${files_to_process[@]}"; do
+      if [[ -n "$file_found" ]]; then # Only process if file_found is NOT empty
+        if _perform_single_rename "$file_found"; then
+          renamed_count=$((renamed_count + 1))
+        else
+          failed_count=$((failed_count + 1))
+        fi
+      fi
+    done
+
+    # REMOVED: Summary printout block, as requested. This was the source of the persistent printf error.
+    # printf "--- Batch Processing Summary ---\n"
+    # printf "Total files considered: %d\n" "$count"
+    # printf "Successfully renamed: %d\n" "$renamed_count"
+    # printf "Failed to rename: %d\n" "$failed_count"
+    if [ "$failed_count" -gt 0 ]; then
+      return 1 # Indicate partial failure
+    fi
+  # Check if target is a single file
+  elif [ -f "$target" ]; then
+    _perform_single_rename "$target"
+  # Target is neither a directory nor a file
+  else
+    printf "Error: '%s' is not a valid file or directory.\n" "$target"
+    _subcommands describe "rename-nb-todo"
+    return 1
+  fi
+}
